@@ -1,0 +1,360 @@
+---
+title: "Neg-Raising analysis project"
+author: "Denis Pisarenko"
+date: "2023-06-18"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#necessary libraries
+
+library(tidyverse)
+library(Hmisc)
+library(caTools)
+library(party)
+library(magrittr)
+library(mltools)
+library(data.table)
+library(caret)
+library(randomForest)
+library(corrr)
+library(FactoMineR)
+library(factoextra)
+library(plyr)
+library(class)
+library(naivebayes)
+
+set.seed(2128506)
+Sys.setenv(LANGUAGE='en')
+```
+
+# The Neg-Raising inferences: quantitative analysis and prediction
+
+This survey is conducted on the MegaNegRaising dataset (An & White 2019) and aims to find out is it possible to predict the emergence of Neg-Raising inference based on the grammatical and semantic features of the utterance.
+
+Neg-Raising (henceforth, NR) is a linguistic phenomenon consisting in that the negation located in the matrix (higher, main) obtains a natural interpretation in the dependent clause. For instance, the sentence in (1a) is most likely to be interpreted as in (1b).
+
+(1) a. I do **not** think Kim should leave =>
+    b. I think Kim should **not** leave
+
+The complexity of the phenomenon is that it is sometimes hard to predict if the NR-inference would arise. In (2), such an inference is absent.
+
+(2) a. I do not insist Kim should leave !=>
+    b. I insist Kim should not leave
+
+Traditionally, the NR is viewed as being invoked by a very restricted class of verbs (Fillmore 1963, Ross 1973, Prince 1976, Gajewski 2007, Romoli 2013), like *believe*, *seem*, *think*, *want*, etc. Since recent times, these verbs are united together as imposing the so-called "excluded-middle inference" (Gajewski 2007, Romoli 2013): if your beliefs are related to *p*, you can either *believe that p* or *believe that not p*, but you cannot believe that no one option is true. But for many other verbs, like *insist*, it is not the case that if you do not insist that *p* you must insist that *not p*.
+
+However, the theoretical approaches mostly concentrate on the origin of Neg-Raising: a lot of research were conducted to find out if NR has semantic or pragmatic roots. However, very little attention is paid to how the grammatical patterns may influence the emergence of NR inference. It can be the case though: for instance, in (3), *think* might trigger less salient Neg-Raising inference than in (1):
+
+(3) a. He was **not** thought to leave ?=>
+    b. He was thought **not** to leave
+
+## MegaNegRaising dataset
+
+The MegaNegRaising dataset came up as a result of An and White's experimental research. A big number of native English speakers hired on Amazon MTurk were provided several sentences with a negation embedded under the verb so they could possibly trigger a NR inference. The participants had to rate the acceptability of the sentence and the legality of the Neg-Raising reading. The sentences varied in several grammatical features, including tense (present vs past), person of the subject (first vs second) and the syntactic frame of the verb.
+
+The rates of the participants were normalized for convenience, so the values in the 'acceptability' and 'negraising' columns are all between 0 and 1.
+
+```{r}
+df <- read_tsv('https://raw.githubusercontent.com/denisyurievichpisarenko/MegaNR/main/mega-negraising-v1-normalized.tsv')
+head(df)
+```
+There were six syntactic frames:
+
+```{r}
+unique(df$frame)
+```
+The number of distinct verbs was equal to 925. These included a wide range of English verbs able to take sentential complements, including even those which can hardly be considered Neg-Raising. The total number of entries was 7936 (significantly less than the product of 925 * 6 * 2 * 2 since not all combinations appeared to be any construable)
+
+```{r}
+length(unique(df$verb))
+nrow(df)
+```
+
+## Hypothesis
+
+The purpose of the original survey was to find out if there are some verbs which take the grammatical variables, such as tense, person, etc as more significant than their semantics. They found out that some of the verbs being inherently Neg-Raising (like *believe* or *think*) undergo some changes being influenced by their grammatical environment. As well as the verbs which are not canonically Neg-Raising (like *hope*) in some circumstances perform as NR ones.
+
+However, the authors did not come up with a firm conclusion on how the variables (grammatical features, types of verbs) in fact influence the NR inference. I am going to examine if there is any regularity in the data which makes it possible to predict the presence or absence of NR inference using different classification algorithms. I am also going to compare these algorithms and find the most appropriate one.
+
+## Data Preprocessing
+
+Let us have a brief look at the data:
+
+```{r}
+(describe(df))
+```
+The person of subject is distributed equally. The distribution of different frames is also quite balance. A slight imbalance is observed for tense variable however the fraction of present tense is still quite imposing. The data has no missing values which is a big pleasure for us.
+
+For the acceptability parameter, the median is set on the level of about 0.5, which is quite convenient. On its turn, the situation with negraising rate is far more problematic. Given that NR inferences occur too rarely, the 50% rates are reached only at the percentile of 90.
+
+Given that our task is to classify the sentences on Neg-Raising and non-Neg-Raising using other variables, we will assign a binary value for the neg-raising column: it would be either 1 (negraising > 0.5) or 0. The sentences which were not considered grammatical (acceptability < 0.5) will be pruned.
+
+```{r}
+df <- filter(df, acceptability > 0.5)
+df <- df %>% mutate(is_nr = as.factor(ifelse(negraising > 0.5, 1, 0)))
+df <- df[,!names(df) %in% c("sentence1", "sentence2", "acceptability", "negraising")]
+head(df)
+```
+
+## EDA
+
+Let us firstly see NR inference are distributed based on different grammatical conditions:
+
+```{r}
+mosaicplot(table(df$frame, df$is_nr),
+           main = "NR inferences across frames",
+           color = "purple",
+           las = 2,
+           cex.axis = 0.5)
+
+mosaicplot(table(df$tense, df$is_nr),
+           main = "NR inferences across tense",
+           color = "magenta",
+           las = 2,
+           cex.axis = 0.5)
+
+mosaicplot(table(df$subject, df$is_nr),
+           main = "NR inferences across peson of subject",
+           color = "orchid",
+           las = 2,
+           cex.axis = 0.5)
+```
+The NR inferences are distributed roughly equally across different grammatical classes. The only category that could be mentioned separately is "NP be V that S" ("I was not believed that a particular thing happened") where NR inferences are exceptionally uncommon.
+
+By the way, what is the frequency of different values for each variable? Seems to be relatively balanced:
+
+```{r}
+frame_freq <- df %>% group_by(frame) %>% dplyr::summarise(total=n())
+tense_freq <- df %>% group_by(tense) %>% dplyr::summarise(total=n())
+subject_freq <- df %>% group_by(subject) %>% dplyr::summarise(total=n())
+
+frame_freq2 <- frame_freq$total
+names(frame_freq2) <- frame_freq$frame
+
+tense_freq2 <- tense_freq$total
+names(tense_freq2) <- tense_freq$tense
+
+subject_freq2 <- subject_freq$total
+names(subject_freq2) <- subject_freq$subject
+
+par(mar=c(3, 15, 3, 1))
+barplot(frame_freq2, las=1, horiz=TRUE, col='skyblue')
+barplot(tense_freq2, col='steelblue')
+barplot(subject_freq2, col='slateblue')
+```
+
+For verbs, it is essential to find out how many entries of each verb left. Let us plot it within a histogram:
+
+```{r}
+verbs_grouped <- df %>% group_by(verb) %>% dplyr::summarise(total = n())
+
+ggplot(verbs_grouped, aes(x=total)) + 
+ geom_histogram(aes(y=..count..), colour="black", fill="lightgreen")
+```
+
+The dataset contains a huge number of rarely occurring verbs: there are about 80 singleton verbs, for instance. This circumstance does not play good for our future predictions since the model will make poor predictions on uncommon variables (risk of overfitting). As well, after the train test split is performed, rare verbs can turn out to be grouped in the train set with no occurrences in the test set (or conversely, which is even worse). Further, we will remove the uncommon verbs.
+
+By the way, let us have a look on the most common ones.
+
+```{r}
+head(verbs_grouped[order(verbs_grouped$total, decreasing=TRUE),])
+```
+
+And compare with the most neg-raising ones (i.e. those which have the greater number of neg-raising entries).
+
+```{r}
+nr_grouped <- df %>% group_by(verb) %>% dplyr::summarise(total = sum(as.numeric(as.character(is_nr))))
+head(nr_grouped[order(nr_grouped$total, decreasing=TRUE),])
+```
+## Model training
+
+### Preparations
+
+Here we prepare our dataframe to apply all necessary algorithms. Let us prune the rare verbs and shuffle the rows:
+
+```{r}
+frequent <- filter(verbs_grouped, total>6) #verbs which occur frequently
+df <- df[df$verb %in% frequent$verb, ] #removing uncommon verbs
+df <- df[sample(1:nrow(df)), ] #shuffling the dataframe
+```
+
+Then separate the predicted value ('is_nr').
+
+```{r}
+X <- df[,!names(df) %in% c('is_nr')] #independent variables: verb, frame, 
+y <- df['is_nr'] #dependent variable
+```
+
+Some algorithms poorly deal with certain symbols in the column names (like square brackets), we should fix it:
+
+```{r}
+X$frame[X$frame=="NP be V to VP[-eventive]"]<-"NP be V to VP noneventive"
+X$frame[X$frame=="NP V to VP[-eventive]"]<-"NP V to VP noneventive"
+X$frame[X$frame=="NP be V to VP[+eventive]"]<-"NP be V to VP eventive"
+X$frame[X$frame=="NP V to VP[+eventive]"]<-"NP V to VP eventive"
+```
+
+Then turn the categorical variables into numerical with one hot encoding. Given the great number of verbs, the dataframe appears to be really large...
+
+```{r}
+factor_X <- X %>% mutate_if(is.character, as.factor)
+one_hot_X <- one_hot(as.data.table(factor_X))
+colnames(one_hot_X) <- make.names(colnames(one_hot_X))
+```
+
+Finally, we can split in onto the training and test set! What is the length of the dataframe?
+
+```{r}
+nrow(one_hot_X)
+```
+
+Okay, if we leave 3300 entries in the training set, it will have 80% of all observations, which is an optimal size.
+
+```{r}
+X_train <- as.data.frame(one_hot_X[1:3300, ])
+X_test <- as.data.frame(one_hot_X[3301:4123, ])
+y_train <- as.data.frame(y[1:3300, ])
+y_test <- as.data.frame(y[3301:4123, ]) #some error may occur here ('attempt to use zero-length variable name'), however, it does not influence anything and appears quite randomly according to StackOverFlow's hivemind
+```
+
+Finally, we can run a couple of algorithms
+
+### Logistic regression
+
+Firstly, we train the logistic regression model on the train data
+
+```{r}
+logreg <- glm(y_train$is_nr ~.,family=binomial(link='logit'), data=X_train)
+logreg$coefficients[390:409] #some coefficients
+```
+
+Then predict the values for the test data and examine the distribution of predictions:
+
+```{r}
+preds <- predict(logreg, newdata = X_test, type = "response")
+quantile(preds, probs = seq(0, 1, 0.1))
+```
+
+Note that the predictions of the regression are float numbers (roughly equal to 0 or 1). To make them binary, we have to round them.
+
+```{r}
+y_hat <- sapply(preds, function(x) round(x))
+```
+
+To test the accuracy of the predictions of this model, we need to build a confusion matrix 
+
+```{r}
+cm_logreg <- confusionMatrix(data=as.factor(y_hat), reference = as.factor(y_test$is_nr))
+cm_logreg
+
+#heatmap visualization
+fourfoldplot(as.table(cm_logreg),color=c("red", "green"),main = "Confusion Matrix")
+```
+
+The majority of the data are 0 which are predicted to be 0. A few entries are correctly predicted 1's. As a result, we have an imposing number of true positives and overall accuracy above 80%. 
+
+However, while it would be impressive for some other dataset, it is not so good for us given that "1" occurs in our data very rare, so an empty classifier which only can insert 0 everywhere would perform with a better accuracy (as shown in "No information rate" output). So what we should do is to build a model with a greater accuracy.
+
+The kappa-coefficient is above 0.2 which shows that true y and predicted y agree to some extent (McHugh 2012) but still there is a high probability that a lot of matching responses appear to be a mere coincidence
+
+### Random forest
+
+Now let us turn to a random forest classifier with a default number of estimators (n_estimators = 500)
+
+```{r}
+rf <- randomForest(y_train$is_nr~., data=X_train, proximity=TRUE) #training the model
+y_rf <- predict(rf, X_test, predict.all=TRUE) #testing the model
+
+#building the confusion matrix
+cm_rf <- confusionMatrix(data=as.factor(y_rf$aggregate), reference = as.factor(y_test$is_nr))
+cm_rf
+#visualization
+fourfoldplot(as.table(cm_rf),color=c("red", "green"),main = "Confusion Matrix")
+```
+
+Not so impressive either but at least we are now able to beat the dummy classifier :) Unlike in the case of logistic regression, the confidence interval of random forest classifier now contains the sacred NIR value. We can conclude that random forest performs better than logistic regression despite it is very far from being perfect. What about some other classifier algorithms?
+
+### KNN and Naive bayes
+
+Unfortunately, they perform even worse. K-Nearest neighours works exactly as a dummy classifier inserting 0 everywhere (even if a very low number of neighbors is taken)
+
+```{r}
+knn_clf <- knn(train=X_train, test=X_test, cl=y_train$is_nr, k=3)
+100 * sum(y_test$is_nr == knn_clf)/nrow(y_test) #compute the accuracy
+
+cm_knn <- confusionMatrix(data=as.factor(knn_clf), reference = as.factor(y_test$is_nr))
+fourfoldplot(as.table(cm_knn),color=c("red", "green"),main = "Confusion Matrix")
+```
+
+What is for Naive Bayes? The same:
+
+```{r}
+nb <- naive_bayes(y_train$is_nr ~ ., data = X_train, usekernel = T) 
+nb_pred <- predict(nb, X_test, type = 'class')
+
+cm_nb <- confusionMatrix(data=as.factor(nb_pred), reference = as.factor(y_test$is_nr))
+fourfoldplot(as.table(cm_nb),color=c("red", "green"),main = "Confusion Matrix")
+```
+
+### Summary on models
+
+Four models: logistic regression, random forest, KNN, and Naive Bayes were tested to predict an extremely rare feature (Neg-Raising inference) in a dataset with a large number of variables (given that each lexical entry is a variable itself). The key features to rate their performance (Cohen's Kappa and accuracy) are summarized below:
+
+```{r}
+cm_logreg$overall[c('Accuracy', 'Kappa')]
+cm_rf$overall[c('Accuracy', 'Kappa')]
+cm_knn$overall[c('Accuracy', 'Kappa')]
+cm_nb$overall[c('Accuracy', 'Kappa')]
+```
+
+In fact, there are only two valid models: logistic regression and random forest. KNN and NB algorithms showed no predictive power on these data completing the task like an empty classifier. Logistic regression made some true predictions, but with a bad accuracy. Random forest classifier turned out to be the best algorithm which could beat an empty classifier. It ain't much but honest work!
+
+## Principal components
+
+Given the large number of variables, maybe it is possible to find some principal components?
+
+Let us check it.
+
+```{r}
+#principal component analysis
+
+corr_matrix <- cor(one_hot_X) #the correlation matrix for the predictors
+data.pca <- princomp(corr_matrix) #pca algorithm implemented here
+summary(data.pca)$loadings[1:10] #ten most important components
+```
+
+Multicollinearity is probably the least important problem of our data, so there is no such a component which overwhelmingly dominates over all other. All the components, including the most important, determine less than 1% of the variation.
+
+But we still can plot it if we want! Looks scary and hardly explains anything though
+
+```{r}
+#graph of the first two components
+
+fviz_pca_var(data.pca, col.var = "black")
+```
+
+## Conclusion
+
+In this study, I attempted to examine if Neg-Raising inferences could be predicted via the machine learning toolkit. However, given that how rarely NR occurs, it turned out to be quite hard to predict the NR interpretation based on existing variables. Some curious predictions can be possibly made by a random forest, however, a big portion of these predictions could occur randomly.
+
+
+## References
+
+An & White 2019 -- An, H. Y., & White, A. S. (2019). The lexical and grammatical sources of neg-raising inferences. arXiv preprint arXiv:1908.05253.
+Fillmore 1963 -- Fillmore, C. J. (1963). The position of embedding transformations in a
+grammar. Word, 19(2), 208-231.
+Gajewski 2007 -- Gajewski, J. R. (2007). Neg-raising and polarity. Linguistics and
+Philosophy, 30(3), 289-328.
+McHugh 2012 -- McHugh, M. L. (2012). Interrater reliability: the kappa statistic. Biochemia medica, 22(3), 276-282.
+Prince 1976 -- Prince, E. F. (1976). The syntax and semantics of neg-raising, with evidence
+from French. Language, 404-426.
+Romoli 2013 -- Romoli, J. (2013). A scalar implicature-based approach to neg-raising.
+Linguistics and philosophy, 36(4), 291-353.
+Ross 1973 -- Ross, J. R. (1973). Slifting. The formal analysis of natural languages, 133-169.
